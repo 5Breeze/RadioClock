@@ -1,72 +1,77 @@
 //
-// nisejjy - fake JJY (standarad time radio broadcast) station
-//     using software radio on ESP32/ESP32-C3.
-// Enhanced version with Web UI, WiFi configuration, and Bluetooth time display
+// Standard Time Radio Broadcast Station
+// Using software radio on ESP32/ESP32-C3.
 //
-// (c) 2021 by taroh (sasaki.taroh@gmail.com)
-// Modified 2024: Added web UI, WiFi config, multi-station scheduling
+// (c) 2021 by taroh (sasaki.taroh@gmail.com) (origin)
 //
-// JJY (Japan): https://ja.wikipedia.org/wiki/JJY
-// WWVB (US): https://en.wikipedia.org/wiki/WWVB
-// DCF77 (Germany) : https://www.eecis.udel.edu/~mills/ntp/dcf77.html
-// BSF (Taiwan): https://en.wikipedia.org/wiki/BSF_(time_service)
-// MSF (UK): https://en.wikipedia.org/wiki/Time_from_NPL_(MSF)
-// BPC (China): https://harmonyos.51cto.com/posts/1731
+// (c) 2025 by 5Breeze (bitshen@qq.com)(improve)
+// Modified 2025: Added web UI, WiFi config, multi-station scheduling, station rotation
 //
-// note: BSF, BPC codes are not certified.
+// Supported Radio Time Services:
+// - JJY (Japan): https://ja.wikipedia.org/wiki/JJY
+// - WWVB (US): https://en.wikipedia.org/wiki/WWVB
+// - DCF77 (Germany): https://www.eecis.udel.edu/~mills/ntp/dcf77.html
+// - BSF (Taiwan): https://en.wikipedia.org/wiki/BSF_(time_service)
+// - MSF (UK): https://en.wikipedia.org/wiki/Time_from_NPL_(MSF)
+// - BPC (China): https://harmonyos.51cto.com/posts/1731
+//
+// NOTE: BSF and BPC codes are not officially certified.
 
 //...................................................................
-// Hardware config - Auto-detect ESP32 variant
+// Hardware Configuration - Auto-detect ESP32 variant
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
-  // ESP32-C3 pins
-  #define PIN_RADIO  (3)
-  #define PIN_BUZZ   (4)
-  #define PIN_LED    (5)
+  // ESP32-C3 GPIO Pins
+  #define PIN_RADIO  (3)  // Radio signal output pin
+  #define PIN_BUZZ   (4)  // Buzzer output pin
+  #define PIN_LED    (5)  // LED indicator pin
 #else
-  // ESP32 (classic) pins
-  #define PIN_RADIO  (26)
-  #define PIN_BUZZ   (27)
-  #define PIN_LED    (25)
+  // ESP32 (Classic) GPIO Pins
+  #define PIN_RADIO  (26) // Radio signal output pin
+  #define PIN_BUZZ   (27) // Buzzer output pin
+  #define PIN_LED    (25) // LED indicator pin
 #endif
 
-#include <WiFi.h>
-#include <WebServer.h>
-#include <SPIFFS.h>
-#include <ArduinoJson.h>
-#include "BluetoothSerial.h"
+// Library Includes
+#include <WiFi.h>           // WiFi connectivity
+#include <WebServer.h>      // HTTP web server
+#include <SPIFFS.h>         // File system for configuration storage
+#include <ArduinoJson.h>    // JSON parsing and generation
+#include "BluetoothSerial.h" // Bluetooth serial communication
 
-BluetoothSerial SerialBT;
-WebServer server(80);
+// Global Objects
+BluetoothSerial SerialBT; // Bluetooth serial instance
+WebServer server(80);     // Web server on port 80
 
-// Configuration constants
-#define DEVICENAME_PREFIX "RadioStation"
-#define DEFAULT_TZ (9 * 60 * 60) /*JST*/
-#define CONFIG_FILE "/config.json"
-#define STATION_CONFIG_FILE "/stations.json"
+// Configuration Constants
+#define DEVICENAME_PREFIX "RadioStation"     // Device name prefix for WiFi AP mode
+#define DEFAULT_TZ (9 * 60 * 60)             // Default timezone: JST (UTC+9)
+#define CONFIG_FILE "/config.json"           // WiFi and timezone configuration file
+#define STATION_CONFIG_FILE "/stations.json" // Station configuration file
 
-// WiFi and configuration
-char ssid[64] = "";
-char passwd[64] = "";
-long timezone_offset = DEFAULT_TZ;  // User-configurable timezone
-unsigned long wifi_connect_start = 0;
-#define WIFI_CONNECT_TIMEOUT 30000  // 30 seconds
-#define WIFI_CONNECT_CHECK_INTERVAL 5000  // 5 seconds
+// WiFi Configuration Variables
+char ssid[64] = "";                          // WiFi SSID (network name)
+char passwd[64] = "";                        // WiFi password
+long timezone_offset = DEFAULT_TZ;           // User-configurable timezone in seconds
+unsigned long wifi_connect_start = 0;        // Timestamp when WiFi connection started
+#define WIFI_CONNECT_TIMEOUT 30000           // WiFi connection timeout: 30 seconds
+#define WIFI_CONNECT_CHECK_INTERVAL 5000     // WiFi connection check interval: 5 seconds
 
 //...................................................................
-// Station specs with station names
-//
-#define SN_JJY_E  (0) // JJY Fukushima Japan (40KHz)
-#define SN_JJY_W  (1) // JJY Fukuoka Japan (60KHz)
-#define SN_WWVB (2)   // WWVB US (60KHz)
-#define SN_DCF77  (3) // DCF77 Germany (77.5KHz)
-#define SN_BSF  (4)   // BSF Taiwan (77.5KHz)
-#define SN_MSF  (5)   // MSF UK (60KHz)
-#define SN_BPC  (6)   // BPC China (68.5KHz)
+// Radio Station Definitions and Specifications
 
-#define SN_DEFAULT  (SN_JJY_E)
-#define NUM_STATIONS 7
+// Station Index Constants
+#define SN_JJY_E  (0) // JJY Fukushima, Japan (40 KHz)
+#define SN_JJY_W  (1) // JJY Fukuoka, Japan (60 KHz)
+#define SN_WWVB (2)   // WWVB, United States (60 KHz)
+#define SN_DCF77  (3) // DCF77, Germany (77.5 KHz)
+#define SN_BSF  (4)   // BSF, Taiwan (77.5 KHz)
+#define SN_MSF  (5)   // MSF, United Kingdom (60 KHz)
+#define SN_BPC  (6)   // BPC, China (68.5 KHz)
 
-// Station names for display
+#define SN_DEFAULT  (SN_JJY_E) // Default station
+#define NUM_STATIONS 7         // Total number of supported stations
+
+// Station Display Names (Full)
 const char *station_names[] = {
   "JJY-E (40KHz)",
   "JJY-W (60KHz)",
@@ -77,6 +82,7 @@ const char *station_names[] = {
   "BPC (68.5KHz)"
 };
 
+// Station Display Names (Short)
 const char *station_short[] = {
   "JJY-E",
   "JJY-W",
@@ -87,131 +93,136 @@ const char *station_short[] = {
   "BPC"
 };
 
-int st_cycle2[] = { // interrupt cycle, KHz: double of station freq
-  80,  // 40KHz JJY-E
-  120, // 60KHz JJY-W
-  120, // 60KHz WWVB
-  155, // 77.5KHz DCF77
-  155, // 77.5KHz BSF
-  120, // 60KHz MSF
-  137  // 68.5KHz BPC
+// Interrupt Cycle for each Station (in units of 1.25 MHz, double of station frequency)
+// Used to generate the correct carrier frequency for each time service
+int st_cycle2[] = {
+  80,  // JJY-E:  40 KHz -> 80 MHz clock cycle
+  120, // JJY-W:  60 KHz -> 120 MHz clock cycle
+  120, // WWVB:   60 KHz -> 120 MHz clock cycle
+  155, // DCF77:  77.5 KHz -> 155 MHz clock cycle
+  155, // BSF:    77.5 KHz -> 155 MHz clock cycle
+  120, // MSF:    60 KHz -> 120 MHz clock cycle
+  137  // BPC:    68.5 KHz -> 137 MHz clock cycle
 };
 
-// Time schedule structure
+// Time Schedule Structure
+// Defines when a specific radio station should be active
 typedef struct {
-  uint8_t station;      // 0-6: which station
-  uint16_t start_min;   // minute of day (0-1439)
-  uint16_t end_min;     // minute of day (0-1439)
+  uint8_t station;      // Station index (0-6)
+  uint16_t start_min;   // Start time in minutes from midnight (0-1439)
+  uint16_t end_min;     // End time in minutes from midnight (0-1439)
 } TimeSchedule;
 
-#define MAX_SCHEDULES 24
-TimeSchedule schedules[MAX_SCHEDULES];
-int schedule_count = 0;
+// Schedule Storage
+#define MAX_SCHEDULES 24                      // Maximum number of schedules
+TimeSchedule schedules[MAX_SCHEDULES];        // Array of time schedules
+int schedule_count = 0;                       // Current number of active schedules
 
-// Multi-station rotation settings
-#define ROTATION_INTERVAL_MINUTES 1  // Switch station every N minutes when multiple stations are active
-int current_schedule_index = -1;     // Current schedule being used (-1 = none)
-unsigned long last_rotation_time = 0; // Last time we rotated to next station
-int applicable_schedules[MAX_SCHEDULES]; // Indexes of applicable schedules for current time
-int applicable_count = 0;            // Number of applicable schedules
+// Multi-Station Rotation Control
+// Used when multiple schedules overlap in time, causing the system to rotate between stations
+#define ROTATION_INTERVAL_MINUTES 1           // Switch station every N minutes during rotation
+int current_schedule_index = -1;              // Current selected schedule (-1 = none active)
+unsigned long last_rotation_time = 0;         // Timestamp of last rotation event
+int applicable_schedules[MAX_SCHEDULES];      // Array of currently applicable schedule indices
+int applicable_count = 0;                     // Number of applicable schedules at current time
+int last_station = -1;                        // Last selected station (prevents redundant switches)
 
-// interrupt cycle to makeup radio wave, buzzer (500Hz = 1KHz cycle):
-// peripheral freq == 80MHz
-//    ex. radio freq 40KHz: intr 80KHz: 80KHz / 80MHz => 1/1000 (1/tm0cycle)
-//    buzz cycle: 1KHz / 80KHz 1/80 (1/radiodiv)
-int tm0cycle;
-#define TM0RES    (1)
-int radiodiv;
+//...................................................................
+// Timer and Interrupt Configuration
 
-// TM0RES (interrupt counter), AMPDIV (buzz cycle(1000) / subsec(10)), SSECDIV (subsec / sec)
-// don't depend on station specs. 
-#define AMPDIV   (100)  // 1KHz / 100 => 10Hz, amplitude may change every 0.1 seconds
-#define SSECDIV    (10) // 10Hz / 10 => 1Hz, clock ticks
+// Hardware Timer Settings
+int tm0cycle;   // Timer 0 cycle count for current station frequency
+#define TM0RES    (1) // Timer 0 resolution (1 = 1.25 MHz)
 
-// enum symbols
-#define SP_0  (0)
-#define SP_1  (1)
-#define SP_M  (2)
-#define SP_P0 (SP_1) // for MSF
-#define SP_P1 (3)    // for MSF
-/*#define SP_M0 (3) // for HBG
-#define SP_M00 (4) // for HBG
-#define SP_M000 (5) // for HBG
- */
-#define SP_2  (2) // for BSF/BPC
-#define SP_3  (3) // for BSF/BPC
-#define SP_M4 (4) // for BSF/BPC
-#define SP_MAX  (SP_M4)
-//
-// bits_STATION[] => *bits60: 60 second symbol buffers, initialized with patterns
-// sp_STATION[] => *secpattern: 0.1sec term pattern in one second, for each symbol
-// * note: when sp_STATION[n * 10], secpattern[] is like 2-dim array secpattern[n][10].
-//
-// JJY & WWVB  *note: comment is the format of JJY.
-int8_t bits_jjy[] = {  // 60bit transmitted frame, of {SP_0, SP_1, SP_M}
-  SP_M, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M, // (M), MIN10[3], 0, MIN1[4], (M)
-  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M, // 0, 0, HOUR10[2], 0, HOUR1[4], (M)
-  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M, // 0, 0, DOY100[2], DOY10[4], (M)
-  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M, // DOY1[4], 0, 0, PA1, PA2, 0, (M)
-  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M, // 0, YEAR[8], (M)
-  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M  // DOW[3], LS1, LS2, 0, 0, 0, 0, (M)
-};
-// *note: if summer time, set bit 57/58 (WWVB) (bit 38/40 (JJY, in future))
-int8_t sp_jjy[] = { // in (0, 1), [SP_x][amplitude_for_0.1sec_term_in_second]
-  1, 1, 1, 1, 1, 1, 1, 1, 0, 0,   // SP_0
-  1, 1, 1, 1, 1, 0, 0, 0, 0, 0,   // SP_1
-  1, 1, 0, 0, 0, 0, 0, 0, 0, 0    // SP_M
-};
-int8_t sp_wwvb[] = { // in (0, 1), [SP_x][amplitude_for_0.1sec_term_in_second]
-  0, 0, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_0
-  0, 0, 0, 0, 0, 1, 1, 1, 1, 1,   // SP_1
-  0, 0, 0, 0, 0, 0, 0, 0, 1, 1    // SP_M
+// Radio and Buzzer Modulation Dividers
+int radiodiv;   // Divider for radio carrier frequency generation
+
+// Time Base Constants
+// Timer interrupt rate depends on frequency: 1 KHz base frequency
+// AMPDIV: Amplitude update frequency (10 Hz)
+// SSECDIV: Second tick frequency (1 Hz)
+#define AMPDIV   (100)  // 1 KHz / 100 => 10 Hz (amplitude update every 0.1 seconds)
+#define SSECDIV   (10)  // 10 Hz / 10 => 1 Hz (clock tick every 1 second)
+
+// Bit Symbol Definitions for Time Code Encoding
+#define SP_0  (0)  // Binary 0 symbol
+#define SP_1  (1)  // Binary 1 symbol
+#define SP_M  (2)  // Minute marker symbol
+#define SP_P0 (SP_1) // MSF parity 0 (= 1)
+#define SP_P1 (3)    // MSF parity 1
+#define SP_2  (2)    // BSF/BPC: symbol 2
+#define SP_3  (3)    // BSF/BPC: symbol 3
+#define SP_M4 (4)    // BSF/BPC: minute marker 4
+#define SP_MAX  (SP_M4) // Maximum symbol value
+
+// NOTE: Symbol patterns are defined in station-specific arrays:
+// bits_STATION[] => bits60[]: 60-second symbol buffer with station-specific patterns
+// sp_STATION[] => secpattern[]: 0.1-second pattern for each symbol (10 patterns per symbol)
+// JJY & WWVB Time Code Patterns
+// NOTE: Comments describe JJY format (WWVB uses similar structure)
+int8_t bits_jjy[] = {  // 60-bit transmission frame: {SP_0, SP_1, SP_M} symbols
+  SP_M, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M, // (M), Minutes[3], 0, Minutes[4], (M)
+  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M, // 0, 0, Hours[2], 0, Hours[4], (M)
+  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M, // 0, 0, Day_of_Year[2], Day_of_Year[4], (M)
+  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M, // Day_of_Year[4], 0, 0, Parity1, Parity2, 0, (M)
+  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M, // 0, Year[8], (M)
+  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M  // Day_of_Week[3], LeapSec1, LeapSec2, 0, 0, 0, 0, (M)
 };
 
-// DCF77 encoding is LSB->MSB. //HBG *note: [0] is changed depending on DCF/HBG (also min/hour).
+// NOTE: For summer time, set bits 57/58 (WWVB) or bits 38/40 (JJY in future)
+
+// JJY Amplitude Modulation Pattern (SP_x defines which amplitude for each 0.1-second subframe)
+int8_t sp_jjy[] = {
+  1, 1, 1, 1, 1, 1, 1, 1, 0, 0,   // SP_0: 80% modulation (8 ticks high, 2 low)
+  1, 1, 1, 1, 1, 0, 0, 0, 0, 0,   // SP_1: 50% modulation (5 ticks high, 5 low)
+  1, 1, 0, 0, 0, 0, 0, 0, 0, 0    // SP_M: Minute marker 20% (2 ticks high, 8 low)
+};
+
+// WWVB Amplitude Modulation Pattern (inverted compared to JJY)
+int8_t sp_wwvb[] = {
+  0, 0, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_0: 80% modulation
+  0, 0, 0, 0, 0, 1, 1, 1, 1, 1,   // SP_1: 50% modulation
+  0, 0, 0, 0, 0, 0, 0, 0, 1, 1    // SP_M: Minute marker 20%
+};
+
+// DCF77 Time Code Patterns (Germany)
+// NOTE: Encoding is LSB->MSB. Bit [0] changes based on DCF/HBG time zone
 int8_t bits_dcf[] = {
-  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // 0, reserved[9]
-  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_1, SP_0, // reserved[5], 0, 0, (0, 1)(MEZ), 0
-  SP_1, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // 1, MIN1[4], MIN10[3], P1, (1->)
-  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // HOUR1[4], HOUR10[2], P2, D1[4]
-  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // D10[2], DOW[3], M1[4], M10[1]
-  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M  // Y1[4], Y10[4], P3, (M)
+  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // 0, Reserved[9]
+  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_1, SP_0, // Reserved[5], 0, 0, Time_Zone, 0
+  SP_1, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // 1, Minutes[4], Minutes[3], Parity1
+  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // Hours[4], Hours[2], Parity2, Day[4]
+  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // Day[2], Day_of_Week[3], Month[4], Month[1]
+  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M  // Year[4], Year[4], Parity3, (Minute Marker)
 };
-int8_t sp_dcf[] = {
-  0, 1, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_0
-  0, 0, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_1
-  1, 1, 1, 1, 1, 1, 1, 1, 1, 1    // SP_M
-};
-/*
-int8_t sp_hbg[] = {
-  0, 1, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_0
-  0, 0, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_1
-  1, 1, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_M
-  0, 1, 0, 1, 1, 1, 1, 1, 1, 1,   // SP_M0    // 00sec
-  0, 1, 0, 1, 0, 1, 1, 1, 1, 1,   // SP_M00   // 00sec at 00min
-  0, 1, 0, 1, 0, 1, 0, 1, 1, 1    // SP_M000  // 00sec at 00/12 hour 00min
-};
-*/
 
-// BSF: quad encoding.
+// DCF77 Amplitude Modulation Pattern
+int8_t sp_dcf[] = {
+  0, 1, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_0: 100ms on, 900ms off
+  0, 0, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_1: 200ms on, 800ms off
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1    // SP_M: Full amplitude (1000ms on)
+};
+
+// BSF Time Code Patterns (Taiwan) - Quad encoding
 int8_t bits_bsf[] = {
   SP_M4, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0,
   SP_0,  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0,
   SP_0,  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0,
   SP_0,  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M4,
-  SP_1,  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0,  // 1, min[3], hour[2.5], P1[.5],
-  SP_0,  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M4  // DOM[2.5], DOW[2.5], mon[2],
-                                                                // year[3.5], P2[.5], 0, 0, M
-};
-int8_t sp_bsf[] = {
-  0, 0, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_0
-  0, 0, 0, 0, 1, 1, 1, 1, 1, 1,   // SP_1
-  0, 0, 0, 0, 0, 0, 0, 0, 1, 1,   // SP_2
-  0, 0, 0, 0, 0, 0, 1, 1, 1, 1,   // SP_3
-  1, 1, 1, 1, 1, 1, 1, 1, 1, 1    // SP_M4
+  SP_1,  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0,  // 1, Minutes[3], Hours[2.5], Parity1[.5]
+  SP_0,  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_M4  // Day_of_Month[2.5], DOW[2.5], Month[2], Year[3.5], Parity2[.5]
 };
 
-// MSF has 4 patterns.
+// BSF Amplitude Modulation Patterns (5 patterns for quad encoding)
+int8_t sp_bsf[] = {
+  0, 0, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_0: Low
+  0, 0, 0, 0, 1, 1, 1, 1, 1, 1,   // SP_1: Lower-mid
+  0, 0, 0, 0, 0, 0, 0, 0, 1, 1,   // SP_2: Mid
+  0, 0, 0, 0, 0, 0, 1, 1, 1, 1,   // SP_3: Upper-mid
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1    // SP_M4: Minute marker (full amplitude)
+};
+
+// MSF Time Code Patterns (UK) - 4 patterns
 int8_t bits_msf[] = {
   SP_M, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0,
   SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0,
@@ -220,74 +231,146 @@ int8_t bits_msf[] = {
   SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0,
   SP_0, SP_0, SP_0, SP_P0, SP_P0, SP_P0, SP_P0, SP_P0, SP_P0, SP_0
 };
+
+// MSF Amplitude Modulation Patterns (4 patterns: SP_0, SP_1/SP_P0, SP_M, SP_P1)
 int8_t sp_msf[] = {
-  0, 1, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_0
-  0, 0, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_1/SP_P0 (parity 0)
-  0, 0, 0, 0, 0, 1, 1, 1, 1, 1,   // SP_M
-  0, 0, 0, 1, 1, 1, 1, 1, 1, 1    // SP_P1 (parity 1)
+  0, 1, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_0: Low
+  0, 0, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_1/SP_P0: Mid (parity 0)
+  0, 0, 0, 0, 0, 1, 1, 1, 1, 1,   // SP_M: Minute marker
+  0, 0, 0, 1, 1, 1, 1, 1, 1, 1    // SP_P1: High (parity 1)
 };
 
-// BPC: quadary and has 5 patterns.
+// BPC Time Code Patterns (China) - Quad with 5 patterns
 int8_t bits_bpc[] = {
-  SP_M4, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // (B), P1, P2, h[2], m[3], DOW[2]
-  SP_0,  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // P3, D[3], M[2], Y[3], P4
-  SP_M4, SP_1, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // P1: 0, 1, 2 for 00-19, -39, -59s
-  SP_0,  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // P2: 0, P3: AM/PM(0/2)+par<hmDOW>
-  SP_M4, SP_2, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // P4: par<DMY> (0/1)
+  SP_M4, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // (B), Parity1, Parity2, Hours[2], Minutes[3], DOW[2]
+  SP_0,  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // Parity3, Day[3], Month[2], Year[3], Parity4
+  SP_M4, SP_1, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // P1: 0, 1, 2 for 00-19, -39, -59 seconds
+  SP_0,  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // P2: 0, P3: AM/PM(0/2)+parity<hmDOW>
+  SP_M4, SP_2, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, // P4: parity<DMY> (0/1)
   SP_0,  SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0, SP_0
 };
+
+// BPC Amplitude Modulation Patterns (5 patterns)
 int8_t sp_bpc[] = {
-  0, 1, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_0
-  0, 0, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_1
-  0, 0, 0, 1, 1, 1, 1, 1, 1, 1,   // SP_2
-  0, 0, 0, 0, 1, 1, 1, 1, 1, 1,   // SP_3
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0    // SP_M4
+  0, 1, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_0: Low
+  0, 0, 1, 1, 1, 1, 1, 1, 1, 1,   // SP_1: Lower-mid
+  0, 0, 0, 1, 1, 1, 1, 1, 1, 1,   // SP_2: Mid
+  0, 0, 0, 0, 1, 1, 1, 1, 1, 1,   // SP_3: Upper-mid
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0    // SP_M4: Minute marker (no modulation)
 };
 
-// func for makeup patterns
-void mb_jjy(void);  // JJY-E, JJY-W
-void mb_wwvb(void); // WWVB
-void mb_dcf(void);  // DCF77
-void mb_bsf(void);  // BSF
-void mb_msf(void);  // MSF
-void mb_bpc(void);  // BPC
+//...................................................................
+// Function Declarations: Time Code Pattern Generation
 
+/**
+ * Generate JJY (Fukushima/Fukuoka) time code pattern for the current second
+ * Encodes: year, month, day, hour, minute, second, day-of-week, leap second, parity
+ */
+void mb_jjy(void);
+
+/**
+ * Generate WWVB (US) time code pattern for the current second
+ * Encodes: year, month, day, hour, minute, second, day-of-year, leap second, parity
+ */
+void mb_wwvb(void);
+
+/**
+ * Generate DCF77 (Germany) time code pattern for the current second
+ * Encodes: minute, hour, day, month, year, day-of-week, time-zone, parity, leap second
+ */
+void mb_dcf(void);
+
+/**
+ * Generate BSF (Taiwan) time code pattern for the current second
+ * Uses quad (4-level) encoding for denser data
+ */
+void mb_bsf(void);
+
+/**
+ * Generate MSF (UK) time code pattern for the current second
+ * Encodes: minute, hour, day, month, year, day-of-week, leap second, parity
+ */
+void mb_msf(void);
+
+/**
+ * Generate BPC (China) time code pattern for the current second
+ * Uses quad (4-level) encoding with 5 amplitude levels
+ */
+void mb_bpc(void);
+
+// Bit pattern lookup table: maps station index to its bit pattern array
 int8_t *st_bits[] = {bits_jjy, bits_jjy, bits_jjy, bits_dcf, bits_bsf, bits_msf, bits_bpc};
-int8_t *bits60;
+int8_t *bits60;  // Pointer to current station's 60-bit pattern
+
+// Amplitude modulation pattern lookup table: maps station index to its modulation pattern
 int8_t *st_sp[]   = {sp_jjy, sp_jjy, sp_wwvb, sp_dcf, sp_bsf, sp_msf, sp_bpc};
-int8_t *secpattern;
+int8_t *secpattern;  // Pointer to current station's per-second modulation pattern
+
+// Function pointer lookup table: maps station index to its pattern generation function
 void (*st_makebits[])(void) = {mb_jjy, mb_jjy, mb_wwvb, mb_dcf, mb_bsf, mb_msf, mb_bpc};
-void (*makebitpattern)(void);
+void (*makebitpattern)(void);  // Function pointer to current station's pattern generator
 
 //...................................................................
-// globals
-hw_timer_t *tm0 = NULL;
-volatile SemaphoreHandle_t  timerSemaphore;
-portMUX_TYPE  timerMux = portMUX_INITIALIZER_UNLOCKED; 
-volatile uint32_t buzzup = 0;     // inc if buzz cycle (/2) passed
-int istimerstarted = 0;
+// Hardware Timer and Interrupt Handling
 
-int radioc = 0; // 0..(RADIODIV - 1)
-int ampc = 0;   // 0..(AMPDIV - 1)
-int tssec = 0;  // 0..(SSECDIV - 1)
+// Hardware Timer 0 (used for radio signal generation)
+hw_timer_t *tm0 = NULL;  // Timer handle (NULL = not initialized)
 
-int ntpsync = 1;
-time_t now;
-struct tm nowtm;
+// Timer interrupt synchronization
+volatile SemaphoreHandle_t timerSemaphore;  // Semaphore for timer interrupt synchronization
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;  // Spinlock for interrupt-safe operations
+volatile uint32_t buzzup = 0;  // Incremented when buzzer cycle completed (counts half-cycles)
 
-int radioout = 0, // pin output values
-    buzzout = 0;
-int ampmod;     // 1 if radio out is active (vibrating), 0 if reducted,
-                // at cuttent subsecond-second frame for current date-time
-int buzzsw = 1; // sound on/off
+// Timer state flag
+int istimerstarted = 0;  // 1 if timer is running, 0 if stopped
 
-// Bluetooth time display (hh:mm:ss format)
-unsigned long last_bt_update = 0;
-#define BT_UPDATE_INTERVAL 1000  // Update every 1 second
+//...................................................................
+// Interrupt Counter Variables
+// These track sub-divisions of the 1 KHz interrupt frequency
 
-// WiFi AP mode for configuration
-bool ap_mode = false;
-unsigned long last_wifi_check = 0;
+int radioc = 0;  // Radio carrier phase counter: 0..(tm0cycle - 1)
+int ampc = 0;    // Amplitude cycle counter: 0..(AMPDIV - 1), generates 10 Hz updates
+int tssec = 0;   // Time base counter: 0..(SSECDIV - 1), generates 1 Hz clock ticks
+
+//...................................................................
+// Network Time and Synchronization
+
+int ntpsync = 1;  // NTP synchronization flag: 1 = synchronized, 0 = not synchronized
+time_t now;       // Current UNIX timestamp (seconds since epoch)
+struct tm nowtm;  // Broken-down time structure (year, month, day, hour, minute, second, etc.)
+
+//...................................................................
+// Output Control Variables
+
+int radioout = 0,  // Current radio output pin value (0 or 1)
+    buzzout = 0;   // Current buzzer output pin value (0 or 1)
+
+/**
+ * Amplitude modulation value for current second
+ * 1 = radio output active (transmitting)
+ * 0 = radio output reduced (no transmission)
+ * Applied to current amplitude subsecond within the second frame
+ */
+int ampmod;
+
+/**
+ * Buzzer control flag
+ * 1 = sound on (generate buzzer output)
+ * 0 = sound off (suppress buzzer output)
+ */
+int buzzsw = 1;
+
+//...................................................................
+// Bluetooth Time Display
+
+unsigned long last_bt_update = 0;  // Timestamp of last Bluetooth time update
+#define BT_UPDATE_INTERVAL 1000    // Bluetooth update interval: 1000 ms (1 second)
+
+//...................................................................
+// WiFi Access Point Mode Configuration
+
+bool ap_mode = false;              // WiFi mode flag: true = AP mode, false = STA mode
+unsigned long last_wifi_check = 0; // Timestamp of last WiFi connection check
 
 // extern 
 void IRAM_ATTR onTimer(void);
@@ -457,21 +540,28 @@ void loop() {
         tssec = 0;
         int lastmin = nowtm.tm_min;
         getlocaltime();
-            
-        // Check if we need to apply a different schedule
-        applyCurrentSchedule();
         
+        // Apply current schedule BEFORE making bit pattern
+        // This ensures the correct station is selected before encoding
+        applyCurrentSchedule();
+            
         if (lastmin != nowtm.tm_min) {
           // Reset schedule index when minute changes - allow rotation to restart
-          current_schedule_index = -1;
           last_rotation_time = millis();
           makebitpattern();
           printbits60();
+        } else {
+          // Every second, check if we need to apply a new schedule (for rotation)
+          // Only regenerate pattern if station changes
+          if (current_schedule_index != -1 && applicable_count > 1) {
+            makebitpattern();  // Update pattern every second when rotating
+          }
         }
-        Serial.printf("%d-%d-%d, %d(%d) %02d:%02d:%02d\n",
+        Serial.printf("%d-%d-%d, %d(%d) %02d:%02d:%02d (sched=%d/%d)\n",
           nowtm.tm_year + 1900, nowtm.tm_mon + 1, nowtm.tm_mday,
           nowtm.tm_yday, nowtm.tm_wday,
-          nowtm.tm_hour, nowtm.tm_min, nowtm.tm_sec);
+          nowtm.tm_hour, nowtm.tm_min, nowtm.tm_sec,
+          current_schedule_index + 1, applicable_count);
       }
       ampchange();
     }
@@ -596,7 +686,7 @@ setstation(int station)
   Serial.printf("station #%d:\n", station);
   tm0cycle = 80000 / st_cycle2[station];
   radiodiv = st_cycle2[station];
-  Serial.printf("  freq %fMHz, timer intr: 80M / (%d x %d), buzz/radio: /%d\n",
+  Serial.printf("  freq %fkHz, timer intr: 80M / (%d x %d), buzz/radio: /%d\n",
     (float)radiodiv / 2., tm0cycle, TM0RES, radiodiv);
   bits60 = st_bits[station];
   Serial.printf("  bits60 pattern: ");
@@ -1032,7 +1122,7 @@ ntpstart(void)
   Serial.printf("IP Address: ");
   Serial.println(ip);
   Serial.printf("configureing NTP...");
-  configTime(timezone_offset, 0, "ntp.nict.jp", "ntp.jst.mfeed.ad.jp"); // enable NTP
+  configTime(timezone_offset, 0, "ntp.aliyun.com", "ntp.jst.mfeed.ad.jp"); // enable NTP
   for (int i = 0; i < 10 && ! getLocalTime(&nowtm); i++) {
     Serial.printf(".");
     delay(1000);
@@ -1191,12 +1281,11 @@ void saveSchedules(void)
   schedFile.print("]");
   schedFile.close();
   Serial.println("Schedules saved");
+  applyCurrentSchedule();
 }
 
 void applyCurrentSchedule(void)
 {
-  static int last_station = -1;
-  
   // Calculate current minute of day (0-1439)
   int current_min = nowtm.tm_hour * 60 + nowtm.tm_min;
   
@@ -1222,21 +1311,29 @@ void applyCurrentSchedule(void)
   } else {
     // Multiple schedules - rotate through them
     unsigned long now = millis();
-    
-    // Initialize on first time
     if (current_schedule_index == -1) {
       current_schedule_index = 0;
       last_rotation_time = now;
+      Serial.printf("Start rotation: %d schedules available\n", applicable_count);
     }
-    
+      // Serial.printf("now: %lu\n", now);
+      // Serial.printf("last_rotation_time: %lu\n", last_rotation_time);
     // Check if it's time to rotate to next schedule
     if ((now - last_rotation_time) >= (ROTATION_INTERVAL_MINUTES * 60000UL)) {
       current_schedule_index++;
+      Serial.print("current_schedule_index:");
+      Serial.println(current_schedule_index);
+
+      Serial.print("applicable_count:");
+      Serial.println(applicable_count);
+
       if (current_schedule_index >= applicable_count) {
         current_schedule_index = 0;
       }
       last_rotation_time = now;
-      Serial.printf("Rotating to schedule %d of %d\n", current_schedule_index + 1, applicable_count);
+      Serial.printf("Rotating to schedule %d of %d (station=%d)\n", 
+                    current_schedule_index + 1, applicable_count,
+                    schedules[applicable_schedules[current_schedule_index]].station);
     }
     
     new_station = schedules[applicable_schedules[current_schedule_index]].station;
@@ -1653,7 +1750,9 @@ String getIndexHTML(void)
   html += "shtml+='<div class=\"schedule-item\"><div class=\"schedule-info\">'";
   html += "+'<strong>'+st+'</strong><br/>'+String(sh).padStart(2,'0')+':'+String(sm).padStart(2,'0')";
   html += "+' - '+String(eh).padStart(2,'0')+':'+String(em).padStart(2,'0')+\"</div>\"";
-  html += "+'<button class=\"btn-danger\" onclick=\"deleteSchedule('+i+'\")>'+(lang==='zh'?'删除':'Delete')+'</button></div>'});";
+  html += "+'<button class=\"btn-danger\" onclick=\"deleteSchedule(' + i + ')\">'"
+        "+(lang === 'zh' ? '删除' : 'Delete')"
+        "+'</button></div>'});";
   html += "document.getElementById('schedulesList').innerHTML=shtml||'<p>'+(lang==='zh'?'暂无计划':'No schedules')+'</p>';";
   html += "}catch(e){console.error(e)}}";
   html += "function showStatus(m,t){const d=document.getElementById('statusMsg');";
