@@ -262,6 +262,5 @@ Enhanced version based on the original nisejjy project:
 
 For redistribution, adaptation, or commercial use, please credit the source.
 
----
 
-If you want, I can also create a **compact README.md version in English** ready for GitHub. Do you want me to do that?
+
