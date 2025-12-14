@@ -1,0 +1,41 @@
+[
+  {
+    "comment": "这是一个示例时间计划配置",
+    "note": "时间以分钟为单位 (0-1439 = 0:00-23:59)",
+    "schedules": [
+      {
+        "id": 1,
+        "name": "Morning - JJY East",
+        "station": 0,
+        "station_name": "JJY-E (40KHz)",
+        "start_time": "00:00",
+        "start_minute": 0,
+        "end_time": "06:00",
+        "end_minute": 360,
+        "description": "午夜至早晨6点使用JJY-E"
+      },
+      {
+        "id": 2,
+        "name": "Daytime - JJY West",
+        "station": 1,
+        "station_name": "JJY-W (60KHz)",
+        "start_time": "06:00",
+        "start_minute": 360,
+        "end_time": "18:00",
+        "end_minute": 1080,
+        "description": "早晨6点至下午6点使用JJY-W"
+      },
+      {
+        "id": 3,
+        "name": "Evening - WWVB",
+        "station": 2,
+        "station_name": "WWVB (60KHz)",
+        "start_time": "18:00",
+        "start_minute": 1080,
+        "end_time": "24:00",
+        "end_minute": 1440,
+        "description": "下午6点至午夜使用WWVB"
+      }
+    ]
+  }
+]
