@@ -550,7 +550,8 @@ void loop() {
           last_rotation_time = millis();
           makebitpattern();
           printbits60();
-        } else {
+        } 
+         else {
           // Every second, check if we need to apply a new schedule (for rotation)
           // Only regenerate pattern if station changes
           if (current_schedule_index != -1 && applicable_count > 1) {
@@ -1577,7 +1578,7 @@ String getIndexHTML(void)
   html += "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
   html += "<title>Radio Station</title>";
   html += "<style>";
-  html += "body{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#667eea,#764ba2);";
+  html += "body{font-family:'Segoe UI',Arial,sans-serif;background: linear-gradient(135deg, #89CFF0, #4682B4);";
   html += "min-height:100vh;margin:0;padding:10px}";
   html += ".container{background:white;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,0.3);";
   html += "max-width:900px;margin:0 auto;overflow:hidden}";
@@ -1700,7 +1701,7 @@ String getIndexHTML(void)
   html += "</div></div></div>";
   
   html += "<script>";
-  html += "const i18n={zh:{title:'无线电时间服务',subtitle:'配置管理面板',tab_wifi:'WiFi设置',";
+  html += "const i18n={zh:{title:'电波钟配置终端',subtitle:'配置管理面板',tab_wifi:'WiFi设置',";
   html += "tab_schedule:'时间计划',tab_station:'电台信息',wifi_settings:'WiFi设置',";
   html += "ssid_label:'网络名称(SSID)',password_label:'密码',timezone_label:'时区(秒)',";
   html += "current_tz:'当前时区偏移',save_wifi:'保存WiFi设置',schedule_manage:'时间计划',";
