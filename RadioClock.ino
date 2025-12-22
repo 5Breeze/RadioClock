@@ -19,27 +19,17 @@
 
 //...................................................................
 // Hardware Configuration - Auto-detect ESP32 variant
-#if defined(CONFIG_IDF_TARGET_ESP32C3)
-  // ESP32-C3 GPIO Pins
-  #define PIN_RADIO  (3)  // Radio signal output pin
-  #define PIN_BUZZ    (4)  // Buzzer output pin
-  #define PIN_LED    (5)  // LED indicator pin
-#else
-  // ESP32 (Classic) GPIO Pins
-  #define PIN_RADIO  (26) // Radio signal output pin
-  #define PIN_BUZZ   (27) // Buzzer output pin
-  #define PIN_LED    (25) // LED indicator pin
-#endif
+  #define PIN_RADIO  (0)  // Radio signal output pin
+  #define PIN_BUZZ   (6)  // Buzzer output pin
+  #define PIN_LED    (7)  // LED indicator pin
 
 // Library Includes
 #include <WiFi.h>           // WiFi connectivity
 #include <WebServer.h>      // HTTP web server
 #include <SPIFFS.h>         // File system for configuration storage
 #include <ArduinoJson.h>    // JSON parsing and generation
-#include "BluetoothSerial.h" // Bluetooth serial communication
 
 // Global Objects
-BluetoothSerial SerialBT; // Bluetooth serial instance
 WebServer server(80);     // Web server on port 80
 
 // Configuration Constants
@@ -120,7 +110,7 @@ int schedule_count = 0;                       // Current number of active schedu
 
 // Multi-Station Rotation Control
 // Used when multiple schedules overlap in time, causing the system to rotate between stations
-#define ROTATION_INTERVAL_MINUTES 1           // Switch station every N minutes during rotation
+#define ROTATION_INTERVAL_MINUTES 5           // Switch station every N minutes during rotation
 int current_schedule_index = -1;              // Current selected schedule (-1 = none active)
 unsigned long last_rotation_time = 0;         // Timestamp of last rotation event
 int applicable_schedules[MAX_SCHEDULES];      // Array of currently applicable schedule indices
@@ -361,12 +351,6 @@ int ampmod;
 int buzzsw = 1;
 
 //...................................................................
-// Bluetooth Time Display
-
-unsigned long last_bt_update = 0;  // Timestamp of last Bluetooth time update
-#define BT_UPDATE_INTERVAL 1000    // Bluetooth update interval: 1000 ms (1 second)
-
-//...................................................................
 // WiFi Access Point Mode Configuration
 
 bool ap_mode = false;              // WiFi mode flag: true = AP mode, false = STA mode
@@ -399,8 +383,6 @@ void startAPMode(void);
 void stopAPMode(void);
 void checkWiFiConnection(void);
 void applyCurrentSchedule(void);
-int docmd(char *buf);
-int a2toi(char *chp);
 void printbits60(void);
 void ntpstart(void);
 void ntpstop(void);
@@ -415,22 +397,18 @@ void ntpstop(void);
 //     propery depending to the intr cycle "tm0cycle" of the station).
 void IRAM_ATTR onTimer(void)
 {
-  if (! radioout && ampmod) {
-    radioout = 1;
-    digitalWrite(PIN_RADIO, HIGH);
-  } else {
-    radioout = 0;
-    digitalWrite(PIN_RADIO, LOW);
-  }
+  portENTER_CRITICAL_ISR(&timerMux);  // 扩大临界区，保护radioout修改
+  // 简化radio输出逻辑，避免中断中复杂判断
+  radioout = (ampmod) ? !radioout : 0;  // 仅当ampmod=1时翻转，否则置0
+  digitalWrite(PIN_RADIO, radioout);
+  
   radioc++;
   if (radiodiv <= radioc) {
     radioc = 0;
-    portENTER_CRITICAL_ISR(&timerMux);           // CRITICAL SECTION ---
     buzzup++;
-    portEXIT_CRITICAL_ISR(&timerMux);            // --- CRITICAL SECTION
-    xSemaphoreGiveFromISR(timerSemaphore, NULL); // free semaphore
+    xSemaphoreGiveFromISR(timerSemaphore, NULL);
   }
-  return;
+  portEXIT_CRITICAL_ISR(&timerMux);
 }
 
 //...................................................................
@@ -449,21 +427,6 @@ void setup(void)
   // Load configuration from SPIFFS
   loadConfig();
   loadSchedules();
-
-  // Setup Bluetooth with time display
-  esp_read_mac(macBT, ESP_MAC_BT);
-  Serial.printf(
-    "Bluetooth MAC %02X:%02X:%02X:%02X:%02X:%02X...",
-    macBT[0], macBT[1], macBT[2], macBT[3], macBT[4], macBT[5]);
-  
-  // Format BT name: "RadioStation_HHMM"
-  snprintf(bt_name, sizeof(bt_name), "%s", DEVICENAME_PREFIX);
-  
-  while (! SerialBT.begin(bt_name)) {
-    Serial.println("error initializing Bluetooth");
-    delay(2000);
-  }
-  Serial.print("\n");
 
   // Check if WiFi credentials are configured
   if (strlen(ssid) == 0) {
@@ -558,108 +521,72 @@ void loop() {
             makebitpattern();  // Update pattern every second when rotating
           }
         }
-        Serial.printf("%d-%d-%d, %d(%d) %02d:%02d:%02d (sched=%d/%d)\n",
+        Serial.printf("%d-%d-%d, %02d:%02d:%02d (sched=%d/%d)\n",
           nowtm.tm_year + 1900, nowtm.tm_mon + 1, nowtm.tm_mday,
-          nowtm.tm_yday, nowtm.tm_wday,
           nowtm.tm_hour, nowtm.tm_min, nowtm.tm_sec,
           current_schedule_index + 1, applicable_count);
       }
       ampchange();
     }
   }
-
-  // Only handle Bluetooth commands if not in AP mode
-  if (!ap_mode) {
-    while (SerialBT.available()) {
-      buf[bufp] = SerialBT.read();
-      if (buf[bufp] == '\n' || buf[bufp] == '\r' ||
-         bufp == sizeof(buf) - 1) {
-        buf[bufp] = '\0';
-        docmd(buf);
-        bufp = 0;
-      } else {
-        bufp++;
-      }
-    }
-  }
-  
-  delay(1); // feed watchdog
+  yield();// feed watchdog
 }
 
 
 //...................................................................
-void
-starttimer(void)
+void starttimer(void)
 {
   if (istimerstarted) {
     stoptimer();
-    delay(150);  // Longer wait for timer cleanup to fully complete
+    delayMicroseconds(100);  // 用微秒级延迟，避免任务阻塞
   }
   
   ampc = 0;
   radioc = 0;
   
-  // Create semaphore
+  // 确保信号量先销毁再创建
   if (timerSemaphore != NULL) {
     vSemaphoreDelete(timerSemaphore);
+    timerSemaphore = NULL;
   }
   timerSemaphore = xSemaphoreCreateBinary();
   
-  // Disable interrupts during timer setup to prevent conflicts
-  portDISABLE_INTERRUPTS();
+  portDISABLE_INTERRUPTS();  // 禁用全局中断
   
-  // Create timer
-  tm0 = timerBegin(0, tm0cycle, true);
+  tm0 = timerBegin(0, tm0cycle, true);  // 定时器0，预分频系数tm0cycle
   if (tm0 == NULL) {
     portENABLE_INTERRUPTS();
     Serial.println("ERROR: Failed to create timer");
     return;
   }
-  
-  // Attach interrupt
   timerAttachInterrupt(tm0, &onTimer, true);
-  delay(5);
-  
-  // Configure alarm
-  timerAlarmWrite(tm0, TM0RES, true);
+  timerAlarmWrite(tm0, TM0RES, true);  // 周期：TM0RES=1，即1/(1.25MHz) = 0.8us
   timerAlarmEnable(tm0);
   
-  portENABLE_INTERRUPTS();  // Re-enable interrupts
-  
-  Serial.println("(re)started timer...");
+  portENABLE_INTERRUPTS();
   istimerstarted = 1;
-  return;
+  Serial.println("Timer started");
 }
 
-void
-stoptimer(void)
+void stoptimer(void)
 {
   if (istimerstarted) {
-    // Disable alarm first - CRITICAL
+    portDISABLE_INTERRUPTS();
     if (tm0 != NULL) {
-      portDISABLE_INTERRUPTS();  // Disable all interrupts during cleanup
-      
       timerAlarmDisable(tm0);
-      delay(20);
-      timerDetachInterrupt(tm0);  // Explicitly detach interrupt
-      delay(20);
+      timerDetachInterrupt(tm0);
       timerEnd(tm0);
-      delay(20);
-      
-      portENABLE_INTERRUPTS();   // Re-enable interrupts
       tm0 = NULL;
     }
+    portENABLE_INTERRUPTS();
     
-    // Delete semaphore if it exists
     if (timerSemaphore != NULL) {
       vSemaphoreDelete(timerSemaphore);
       timerSemaphore = NULL;
     }
-    
     istimerstarted = 0;
     Serial.println("Timer stopped");
   }
-  return;
 }
 
 // setup amplitude value ampmod depends on bit pattern & 0.1 second frame
@@ -701,8 +628,10 @@ setstation(int station)
   }
   Serial.printf("...\n");
   makebitpattern = st_makebits[station];
+  yield();
   makebitpattern();
   printbits60();
+  yield();
   starttimer();
   return;
 }
@@ -741,6 +670,7 @@ mb_jjy(void)   //---- JJY_E & JJY_W
   binarize(nowtm.tm_year % 10, 45, 4);
   binarize(nowtm.tm_wday, 50, 3);
 //  Serial.printf("year%d-%d dow%d\n", tyear / 10, tyear % 10, tdow);
+  yield();
   return;
 }
 
@@ -751,6 +681,7 @@ mb_wwvb(void)
   mbc_wwvbjjy();
   binarize((nowtm.tm_year - 100) / 10, 45, 4);
   binarize(nowtm.tm_year % 10, 50, 4);
+  yield();
   return;
 }
 
@@ -768,6 +699,7 @@ mb_dcf(void)  //---- DCF77
   rbcdize(nowtm.tm_mon + 1, 45, 5);
   rbcdize(nowtm.tm_year - 100, 50, 8);
   bits60[58] = parity(36, 22);
+  yield();
   return;
 }
 
@@ -802,6 +734,7 @@ mb_bsf(void)   //---- BSF
   quadize(nowtm.tm_mon + 1, 51, 2);
   quadize((nowtm.tm_year - 100) * 2, 53, 4);
   bits60[56] |= qparity(47, 10);
+  yield();
   return;
 }
 
@@ -820,7 +753,7 @@ mb_msf(void)
   bits60[56] = parity(36, 3) * 2 + 1;
   bits60[57] = parity(39, 13) * 2 + 1;
   bits60[58] = SP_1;  // change here to SP_P1 if summertime 
-
+  yield();
   return;
 }
 
@@ -840,6 +773,7 @@ mb_bpc(void)
     bits60[20 + i] = bits60[i];
     bits60[40 + i] = bits60[i];
   }
+  yield();
   return;
 }
 
@@ -991,105 +925,6 @@ qparity(int pos, int len)
 //  return;
 //}
 
-//...................................................................
-// Bluetooth command
-//
-// y[01]: NTP sync off/on
-//   to force set the current date/time (d/t), first turn off NTP sync.
-// dYYMMDD: set date to YY/MM/DD
-// tHHmmSS: set time to HH:mm:SS
-// z[01]: buzzer off/on
-// s[jkwdhmb]: set station to JJY_E, JJY_W, WWVB, DCF77, HBG, MSF, BPC
-
-int
-docmd(char *buf)
-{
-  int arg1, arg2;
-  Serial.printf("cmd: >>%s<<\n", buf);
-  if (buf[0] == 'd' || buf[0] == 'D') { // set date
-    if (strlen(buf) != 7) {
-      return 0;
-    }
-    int y = a2toi(buf + 1);
-    int m = a2toi(buf + 3);
-    int d = a2toi(buf + 5);
-    Serial.printf("%d %d %d\n", y, m, d);
-    if (y < 0 || m < 0 || 12 < m || d < 0 || 31 < d) {  // can set Feb 31 :-)
-      return 0;
-    }
-    nowtm.tm_year = y + 100;
-    nowtm.tm_mon = m - 1;
-    nowtm.tm_mday = d;
-    setlocaltime();
-    Serial.printf("set date: >>%s<<\n", buf + 1);
-    return 1;
-  } else if (buf[0] == 't' || buf[0] == 'T') { // set time & start tick
-    if (strlen(buf) != 7) {
-      return 0;
-    }
-    int h = a2toi(buf + 1);
-    int m = a2toi(buf + 3);
-    int s = a2toi(buf + 5);
-    if (h < 0 || 24 < h || m < 0 || 60 < m || s < 0 || 60 < s) {
-      return 0;
-    }
-    nowtm.tm_hour = h;
-    nowtm.tm_min = m;
-    nowtm.tm_sec = s;
-    tssec = 0;
-    ampc = 0;
-    radioc = 0; // no semaphore lock: don't care if override by intr routine :-)
-    setlocaltime();
-    Serial.printf("set time...restart tick: >>%s<<\n", buf + 1);
-    return 1;
-  } else if (buf[0] == 'z' || buf[0] == 'Z') { // buzzer on(1)/off(0)
-    if (buf[1] == '0') {
-      buzzsw = 0;
-    } else if (buf[1] == '1') {
-      buzzsw = 1;
-    } else {
-      return 0;
-    }
-    Serial.printf("buzzer: >>%c<<\n", buf + 1);
-    return 1;
-  } else if (buf[0] == 's' || buf[0] == 'S') { // set station
-    char s[] = //"jJkKwWdDhHmMbB"
-              {'j', 'J', 'k', 'K', 'w', 'W', 'd', 'D', 't', 'T', 'm', 'M', 'c', 'C', '\0'},
-              *chp;
-    if ((chp = strchr(s, buf[1])) != NULL) {
-      setstation((int)(chp - s) / 2);
-      return 1;
-    } else {
-      return 0;
-    }
-  } else if (buf[0] == 'y' || buf[0] == 'Y') { // NTP sync
-        if (buf[1] == '0') {
-      ntpsync = 0;
-      ntpstop();
-    } else if (buf[1] == '1') {
-      ntpsync = 1;
-      ntpstart();
-    } else {
-      return 0;
-    }
-  }
-  return 0;
-}
-
-int
-a2toi(char *chp)
-{
-  int v = 0;
-  for (int i = 0; i < 2; chp++, i++) {
-    if (*chp < '0' || '9' < *chp) {
-      return -1;
-    }
-    v = v * 10 + (*chp - '0');
-  }
-  return v;
-}
-
-
 void
 printbits60(void)
 {
@@ -1100,7 +935,6 @@ printbits60(void)
   Serial.print("\n");
   return;
 }
-
 
 void
 ntpstart(void)
