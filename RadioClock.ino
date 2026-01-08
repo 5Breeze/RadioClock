@@ -545,7 +545,7 @@ void starttimer(void)
 {
   if (istimerstarted) {
     stoptimer();
-    delayMicroseconds(100);  // 用微秒级延迟，避免任务阻塞
+    delayMicroseconds(80);  // 用微秒级延迟，避免任务阻塞
   }
   
   ampc = 0;
